@@ -18,21 +18,28 @@ connectDB();
 const app = express();
 const httpServer = createServer(app);
 
-// ── CORS config (single source of truth) ──────────────
+// ── CORS — single source of truth, trailing slash stripped ────
 const allowedOrigins = [
-  process.env.FRONTEND_URL,          // your Vercel URL from env
+  process.env.FRONTEND_URL,
   'http://localhost:5173',
   'http://localhost:3000',
-].filter(Boolean);                   // removes undefined if env not set
+]
+  .filter(Boolean)
+  .map((url) => url.trim().replace(/\/$/, '')); // BUG FIX: strips trailing slash
+
+console.log('[CORS] Allowed origins:', allowedOrigins);
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // allow requests with no origin (Postman, mobile, curl)
-    if (!origin || allowedOrigins.includes(origin)) {
+    // allow Postman / curl / mobile (no origin header)
+    if (!origin) return callback(null, true);
+
+    const cleanOrigin = origin.trim().replace(/\/$/, '');
+    if (allowedOrigins.includes(cleanOrigin)) {
       callback(null, true);
     } else {
       console.error('[CORS] Blocked origin:', origin);
-      callback(new Error('CORS: Origin not allowed'));
+      callback(new Error('CORS: Origin not allowed → ' + origin));
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -40,46 +47,52 @@ const corsOptions = {
   credentials: true,
 };
 
-// ── Socket.IO ─────────────────────────────────────────
+// ── Socket.IO ─────────────────────────────────────────────────
 const io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins,          // reuse same list
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true,
   },
 });
 
-// ── Middleware (order matters) ────────────────────────
+// ── Middleware (ORDER MATTERS) ────────────────────────────────
 app.use(helmet());
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // ← handle ALL preflight requests
-app.use(express.json({ limit: '10mb' }));           // ← moved BEFORE rate limiter
+app.options('*', cors(corsOptions)); // BUG FIX: handle ALL preflight OPTIONS requests
+
+app.use(express.json({ limit: '10mb' }));           // BUG FIX: must be before rate limiter
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// ── Rate limiting ─────────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-  message: 'Too many requests from this IP, please try again later.',
-  standardHeaders: true,   // return RateLimit-* headers
+  message: { success: false, message: 'Too many requests, please try again later.' },
+  standardHeaders: true,
   legacyHeaders: false,
 });
 
 app.use('/api/', limiter);
 
-// ── Routes ────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ success: true, message: 'Server is running' });
+  res.status(200).json({
+    success: true,
+    message: 'Server is running',
+    environment: process.env.NODE_ENV,
+    allowedOrigins,
+  });
 });
 
-// ── Socket.IO events ──────────────────────────────────
+// ── Socket.IO events ──────────────────────────────────────────
 const connectedUsers = new Map();
 
 io.on('connection', (socket) => {
-  console.log('New client connected:', socket.id);
+  console.log('[Socket] Client connected:', socket.id);
 
   socket.on('user_login', (data) => {
     connectedUsers.set(socket.id, data.userId);
@@ -103,24 +116,23 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    console.log('[Socket] Client disconnected:', socket.id);
     connectedUsers.delete(socket.id);
   });
 });
 
-// ── Error handling (must be last) ────────────────────
+// ── Error handling (MUST be last, after routes) ───────────────
 app.use(errorHandler);
 
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Route not found' });
 });
 
-// ── Start server ──────────────────────────────────────
+// ── Start server ──────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV}`);
-  console.log(`Allowed origins:`, allowedOrigins);  // ← confirm on startup
+  console.log(`[Server] Running on port ${PORT}`);
+  console.log(`[Server] Environment: ${process.env.NODE_ENV}`);
 });
 
 export { io };

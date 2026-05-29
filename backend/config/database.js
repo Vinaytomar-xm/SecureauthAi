@@ -5,15 +5,16 @@ dotenv.config();
 
 export const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/secureauth', {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    // BUG FIX: useNewUrlParser and useUnifiedTopology are deprecated in Mongoose 7+
+    // Mongoose 7 sets them to true internally — passing them causes a warning/error
+    const conn = await mongoose.connect(
+      process.env.MONGODB_URI || 'mongodb://localhost:27017/secureauth'
+    );
 
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
+    console.log(`[DB] MongoDB connected: ${conn.connection.host}`);
     return conn;
   } catch (error) {
-    console.error(`Error: ${error.message}`);
+    console.error(`[DB] Connection failed: ${error.message}`);
     process.exit(1);
   }
 };
