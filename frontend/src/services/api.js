@@ -1,20 +1,17 @@
 import axios from 'axios';
 
-// BUG FIX: VITE_API_URL must be set on Vercel as an env variable
-// pointing to https://secureauth-backend-85f6.onrender.com/api
-// Without this, all API calls go to vercel.app/api → 404
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
-  withCredentials: true, // BUG FIX: required when backend uses credentials: true in CORS
-  timeout: 15000,        // 15s timeout — Render free tier can be slow on cold start
+  withCredentials: true,
+  timeout: 60000, // 60 seconds — handles Render free tier cold start (takes 30-60s to wake up)
 });
 
-// ── Request interceptor — attach JWT ─────────────────────────
+// ── Attach JWT to every request ───────────────────────────────────────────────
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
@@ -26,7 +23,7 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// ── Response interceptor — handle 401 globally ───────────────
+// ── Handle errors globally ────────────────────────────────────────────────────
 api.interceptors.response.use(
   (response) => response,
   (error) => {
@@ -36,39 +33,46 @@ api.interceptors.response.use(
       window.location.href = '/login';
     }
 
-    // Surface a clean error message for the UI
-    const message =
-      error.response?.data?.message ||
-      (error.code === 'ECONNABORTED' ? 'Request timed out. The server may be starting up — please try again.' : null) ||
-      (error.message === 'Network Error' ? 'Cannot reach the server. Check your connection.' : null) ||
-      'An unexpected error occurred.';
+    // Attach friendly message for UI
+    if (error.code === 'ECONNABORTED') {
+      error.displayMessage = 'Server is waking up, please try again in 30 seconds.';
+    } else if (error.message === 'Network Error') {
+      error.displayMessage = 'Cannot reach the server. Check your connection.';
+    } else {
+      error.displayMessage = error.response?.data?.message || 'Something went wrong.';
+    }
 
-    error.displayMessage = message;
     return Promise.reject(error);
   }
 );
 
-// ── Auth Services ─────────────────────────────────────────────
+// ── Auth Services ─────────────────────────────────────────────────────────────
 export const authService = {
-  register: (data) => api.post('/auth/register', data),
-  login: (email, password) => api.post('/auth/login', { email, password }),
-  verifyOTP: (email, otp) => api.post('/auth/verify-otp', { email, otp }),
-  getProfile: () => api.get('/auth/profile'),
-  logout: () => api.post('/auth/logout'),
-  forgotPassword: (email) => api.post('/auth/forgot-password', { email }),
-  resetPassword: (data) => api.post('/auth/reset-password', data),
-  changePassword: (data) => api.post('/auth/change-password', data),
+  register: async (data) => api.post('/auth/register', data),
+  login: async (email, password) => api.post('/auth/login', { email, password }),
+  verifyOTP: async (email, otp) => api.post('/auth/verify-otp', { email, otp }),
+  getProfile: async () => api.get('/auth/profile'),
+  logout: async () => api.post('/auth/logout'),
+  forgotPassword: async (email) => api.post('/auth/forgot-password', { email }),
+  resetPassword: async (data) => api.post('/auth/reset-password', data),
+  changePassword: async (data) => api.post('/auth/change-password', data),
 };
 
-// ── Admin Services ────────────────────────────────────────────
+// ── Admin Services ────────────────────────────────────────────────────────────
 export const adminService = {
-  getDashboardStats: () => api.get('/admin/dashboard'),
-  getAllUsers: (page = 1, limit = 10) => api.get(`/admin/users?page=${page}&limit=${limit}`),
-  getUserSecurityDetails: (userId) => api.get(`/admin/user/${userId}/security`),
-  getSecurityAlerts: (severity = 'all', days = 7) => api.get(`/admin/alerts?severity=${severity}&days=${days}`),
-  getThreatAnalysis: (days = 30) => api.get(`/admin/threats?days=${days}`),
-  lockUserAccount: (userId) => api.post(`/admin/user/${userId}/lock`),
-  unlockUserAccount: (userId) => api.post(`/admin/user/${userId}/unlock`),
+  getDashboardStats: async () => api.get('/admin/dashboard'),
+  getAllUsers: async (page = 1, limit = 10) =>
+    api.get(`/admin/users?page=${page}&limit=${limit}`),
+  getUserSecurityDetails: async (userId) =>
+    api.get(`/admin/user/${userId}/security`),
+  getSecurityAlerts: async (severity = 'all', days = 7) =>
+    api.get(`/admin/alerts?severity=${severity}&days=${days}`),
+  getThreatAnalysis: async (days = 30) =>
+    api.get(`/admin/threats?days=${days}`),
+  lockUserAccount: async (userId) =>
+    api.post(`/admin/user/${userId}/lock`),
+  unlockUserAccount: async (userId) =>
+    api.post(`/admin/user/${userId}/unlock`),
 };
 
 export default api;

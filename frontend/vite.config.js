@@ -4,9 +4,9 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Proxy only works in LOCAL development (npm run dev)
-    // On Vercel (production), VITE_API_URL env variable is used instead
-    // Set VITE_API_URL=https://secureauth-backend-85f6.onrender.com/api on Vercel
+    // Proxy only works LOCAL development (npm run dev).
+    // On Vercel (production) there is NO proxy — VITE_API_URL env variable is used instead.
+    // Set on Vercel: VITE_API_URL = https://secureauth-backend-85f6.onrender.com/api
     proxy: {
       '/api': {
         target: 'http://localhost:5000',
@@ -18,6 +18,6 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: false, // disable sourcemaps in production for smaller bundle
+    sourcemap: false, // disable in production for smaller bundle
   },
 });

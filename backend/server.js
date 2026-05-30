@@ -18,24 +18,24 @@ connectDB();
 const app = express();
 const httpServer = createServer(app);
 
-// ── CORS — single source of truth, trailing slash stripped ────
+// ── CORS — handles localhost + Vercel both ────────────────────────────────────
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   'http://localhost:5173',
   'http://localhost:3000',
+  'https://secureauth-frontend-xi.vercel.app',
 ]
   .filter(Boolean)
-  .map((url) => url.trim().replace(/\/$/, '')); // BUG FIX: strips trailing slash
+  .map((url) => url.trim().replace(/\/$/, ''));
 
 console.log('[CORS] Allowed origins:', allowedOrigins);
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // allow Postman / curl / mobile (no origin header)
+    // Allow Postman, curl, mobile apps (no origin header)
     if (!origin) return callback(null, true);
-
-    const cleanOrigin = origin.trim().replace(/\/$/, '');
-    if (allowedOrigins.includes(cleanOrigin)) {
+    const clean = origin.trim().replace(/\/$/, '');
+    if (allowedOrigins.includes(clean)) {
       callback(null, true);
     } else {
       console.error('[CORS] Blocked origin:', origin);
@@ -47,7 +47,7 @@ const corsOptions = {
   credentials: true,
 };
 
-// ── Socket.IO ─────────────────────────────────────────────────
+// ── Socket.IO ─────────────────────────────────────────────────────────────────
 const io = new Server(httpServer, {
   cors: {
     origin: allowedOrigins,
@@ -56,15 +56,15 @@ const io = new Server(httpServer, {
   },
 });
 
-// ── Middleware (ORDER MATTERS) ────────────────────────────────
+// ── Middleware — ORDER MATTERS ────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // BUG FIX: handle ALL preflight OPTIONS requests
+app.options('*', cors(corsOptions)); // Handle ALL preflight OPTIONS requests
 
-app.use(express.json({ limit: '10mb' }));           // BUG FIX: must be before rate limiter
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// ── Rate limiting ─────────────────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
@@ -72,10 +72,9 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-
 app.use('/api/', limiter);
 
-// ── Routes ────────────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 
@@ -88,11 +87,15 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ── Socket.IO events ──────────────────────────────────────────
+// ── Socket.IO events ──────────────────────────────────────────────────────────
 const connectedUsers = new Map();
 
 io.on('connection', (socket) => {
   console.log('[Socket] Client connected:', socket.id);
+
+  socket.on('join_admin', () => {
+    socket.join('admin-room');
+  });
 
   socket.on('user_login', (data) => {
     connectedUsers.set(socket.id, data.userId);
@@ -106,7 +109,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('security_alert', (data) => {
-    io.emit('alert_notification', {
+    io.to('admin-room').emit('alert_notification', {
       type: data.alertType,
       userId: data.userId,
       severity: data.severity,
@@ -121,14 +124,14 @@ io.on('connection', (socket) => {
   });
 });
 
-// ── Error handling (MUST be last, after routes) ───────────────
+// ── Error handling — MUST be last ────────────────────────────────────────────
 app.use(errorHandler);
 
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Route not found' });
 });
 
-// ── Start server ──────────────────────────────────────────────
+// ── Start server ──────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 httpServer.listen(PORT, () => {
   console.log(`[Server] Running on port ${PORT}`);

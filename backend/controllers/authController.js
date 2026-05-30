@@ -1,4 +1,5 @@
-import bcryptjs from 'bcryptjs'; // BUG FIX #1: was missing — resetPassword & changePassword crashed
+// FIX #1: bcryptjs was used in resetPassword & changePassword but never imported → ReferenceError
+import bcryptjs from 'bcryptjs';
 import User from '../models/User.js';
 import SecurityLog from '../models/SecurityLog.js';
 import jwt from 'jsonwebtoken';
@@ -29,7 +30,7 @@ const generateToken = (id, role) => {
   });
 };
 
-// ── Register ──────────────────────────────────────────────────
+// ── Register ──────────────────────────────────────────────────────────────────
 export const register = async (req, res, next) => {
   try {
     const { firstName, lastName, email, password, confirmPassword } = req.body;
@@ -37,11 +38,9 @@ export const register = async (req, res, next) => {
     if (!firstName || !lastName || !email || !password || !confirmPassword) {
       return res.status(400).json({ success: false, message: 'Please provide all required fields' });
     }
-
     if (password !== confirmPassword) {
       return res.status(400).json({ success: false, message: 'Passwords do not match' });
     }
-
     if (password.length < 8) {
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
     }
@@ -78,7 +77,7 @@ export const register = async (req, res, next) => {
   }
 };
 
-// ── Login with Risk Assessment ────────────────────────────────
+// ── Login with Risk Assessment ────────────────────────────────────────────────
 export const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
@@ -125,13 +124,17 @@ export const login = async (req, res, next) => {
       });
     }
 
-    // ── Gather context info ────────────────────────────────────
+    // ── Gather context ────────────────────────────────────────────────────────
     const userAgent = req.headers['user-agent'] || 'Unknown';
     const deviceInfo = extractDeviceInfo(userAgent);
     const ipAddress = getClientIP(req);
     const location = getLocationFromIP(ipAddress);
 
-    // BUG FIX #2: riskFactors is an object — don't call .push() on it
+    // FIX #2 & #3: riskFactors is a plain OBJECT — was doing .push() on it (TypeError)
+    // and const riskScore was being reassigned with += (TypeError: Assignment to constant)
+    // Solution: check VPN BEFORE building riskFactors so score includes it from the start
+    const vpnDetected = isVPNorProxy(ipAddress); // FIX #4: isVPNorProxy is sync — removed await
+
     const riskFactors = {
       failedAttempts: user.failedLoginAttempts,
       isNewDevice: isNewDevice(user, deviceInfo.deviceId),
@@ -140,7 +143,7 @@ export const login = async (req, res, next) => {
       geographicAnomalySuspicious: false,
       rapidLocationChange: false,
       phishingDetected: false,
-      vpnDetected: false,       // BUG FIX #2: was riskFactors.push('unauthorized_network_detected')
+      vpnDetected,        // FIX #2: set as property, not .push()
       torDetected: false,
       userAgentMismatch: false,
     };
@@ -150,19 +153,11 @@ export const login = async (req, res, next) => {
       riskFactors.rapidLocationChange = checkRapidLocationChange(lastLogin.location, location);
     }
 
-    // BUG FIX #3: isVPNorProxy is synchronous — no need for await
-    const isUnauthorizedNetwork = isVPNorProxy(ipAddress);
-    if (isUnauthorizedNetwork) {
-      riskFactors.vpnDetected = true; // BUG FIX #2: set on object, not push to array
-    }
-
-    // BUG FIX #4: riskScore was const but then riskScore += 10 tried to reassign it → runtime crash
-    // Moved VPN check BEFORE calculateRiskScore so it's included in the score
-    let riskScore = calculateRiskScore(riskFactors);
+    // FIX #3: use let so it can be used (even though we no longer need +=)
+    const riskScore = calculateRiskScore(riskFactors);
     const riskLevel = getRiskLevel(riskScore);
     const riskAction = getRiskAction(riskLevel);
 
-    // ── Record login ──────────────────────────────────────────
     await user.recordLogin({
       ipAddress,
       deviceId: deviceInfo.deviceId,
@@ -188,7 +183,7 @@ export const login = async (req, res, next) => {
       status: 'verified',
     });
 
-    // ── Send OTP ──────────────────────────────────────────────
+    // Generate and send OTP for every login
     const otp = generateOTP();
     user.otpCode = otp;
     user.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
@@ -197,25 +192,24 @@ export const login = async (req, res, next) => {
     try {
       await sendOTPEmail(email, otp, user.firstName);
     } catch (emailError) {
-      console.error('[Email] Failed to send OTP:', emailError.message);
-      // Don't block login if email fails — return error to user
+      console.error('[Email] OTP send failed:', emailError.message);
       return res.status(500).json({
         success: false,
         message: 'Failed to send OTP email. Please try again.',
       });
     }
 
-    if (riskAction.notifyUser || isUnauthorizedNetwork) {
+    if (riskAction.notifyUser || vpnDetected) {
       try {
         await sendSecurityAlertEmail(email, user.firstName, {
           type: riskLevel === 'critical' ? 'Unusual Login Detected' : 'Verification Needed',
-          location: location.city,
+          location: location.city || 'Unknown',
           riskLevel: riskLevel.toUpperCase(),
-          isUnauthorizedNetwork,
+          isUnauthorizedNetwork: vpnDetected,
           riskScore,
         });
       } catch (alertError) {
-        console.error('[Email] Failed to send security alert:', alertError.message);
+        console.error('[Email] Alert send failed:', alertError.message);
         // Non-fatal — continue
       }
     }
@@ -226,14 +220,14 @@ export const login = async (req, res, next) => {
       requireOTP: true,
       riskLevel,
       riskScore,
-      isUnauthorizedNetwork,
+      isUnauthorizedNetwork: vpnDetected,
     });
   } catch (error) {
     next(error);
   }
 };
 
-// ── Verify OTP ────────────────────────────────────────────────
+// ── Verify OTP ────────────────────────────────────────────────────────────────
 export const verifyOTP = async (req, res, next) => {
   try {
     const { email, otp } = req.body;
@@ -286,11 +280,11 @@ export const verifyOTP = async (req, res, next) => {
   }
 };
 
-// ── Get Profile ───────────────────────────────────────────────
+// ── Get Profile ───────────────────────────────────────────────────────────────
 export const getProfile = async (req, res, next) => {
   try {
-    // BUG FIX #5: .populate('devices loginHistory') was wrong — these are embedded
-    // subdocuments NOT references. populate() only works on ObjectId refs → removed it
+    // FIX #5: .populate('devices loginHistory') was wrong — these are embedded subdocuments
+    // NOT ObjectId refs to other collections. .populate() only works on ObjectId refs.
     const user = await User.findById(req.user.id);
 
     if (!user) {
@@ -318,7 +312,7 @@ export const getProfile = async (req, res, next) => {
   }
 };
 
-// ── Logout ────────────────────────────────────────────────────
+// ── Logout ────────────────────────────────────────────────────────────────────
 export const logout = async (req, res, next) => {
   try {
     res.status(200).json({ success: true, message: 'Logged out successfully' });
@@ -327,7 +321,7 @@ export const logout = async (req, res, next) => {
   }
 };
 
-// ── Forgot Password ───────────────────────────────────────────
+// ── Forgot Password ───────────────────────────────────────────────────────────
 export const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
@@ -337,9 +331,13 @@ export const forgotPassword = async (req, res, next) => {
     }
 
     const user = await User.findOne({ email });
+
+    // FIX: return same response whether user exists or not — prevents email enumeration
     if (!user) {
-      // Return same message to prevent email enumeration
-      return res.status(200).json({ success: true, message: 'If this email exists, an OTP has been sent.' });
+      return res.status(200).json({
+        success: true,
+        message: 'If this email is registered, an OTP has been sent.',
+      });
     }
 
     const otp = generateOTP();
@@ -349,13 +347,16 @@ export const forgotPassword = async (req, res, next) => {
 
     await sendOTPEmail(email, otp, user.firstName);
 
-    res.status(200).json({ success: true, message: 'If this email exists, an OTP has been sent.' });
+    res.status(200).json({
+      success: true,
+      message: 'If this email is registered, an OTP has been sent.',
+    });
   } catch (error) {
     next(error);
   }
 };
 
-// ── Reset Password ────────────────────────────────────────────
+// ── Reset Password ────────────────────────────────────────────────────────────
 export const resetPassword = async (req, res, next) => {
   try {
     const { email, otp, newPassword, confirmPassword } = req.body;
@@ -363,15 +364,14 @@ export const resetPassword = async (req, res, next) => {
     if (!email || !otp || !newPassword || !confirmPassword) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
-
     if (newPassword !== confirmPassword) {
       return res.status(400).json({ success: false, message: 'Passwords do not match' });
     }
-
     if (newPassword.length < 8) {
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
     }
 
+    // FIX: select +otpCode so we can read it
     const user = await User.findOne({ email }).select('+otpCode');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -380,14 +380,12 @@ export const resetPassword = async (req, res, next) => {
     if (!user.otpCode || !user.otpExpires || new Date() > user.otpExpires) {
       return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
     }
-
     if (user.otpCode !== otp) {
       return res.status(400).json({ success: false, message: 'Invalid OTP' });
     }
 
-    // BUG FIX #1: bcryptjs was used here but never imported → fixed by adding import at top
-    const hashedPassword = await bcryptjs.hash(newPassword, 10);
-    user.password = hashedPassword;
+    // FIX #1: bcryptjs now imported at top — no more ReferenceError
+    user.password = await bcryptjs.hash(newPassword, 10);
     user.otpCode = undefined;
     user.otpExpires = undefined;
     user.lastPasswordChange = new Date();
@@ -399,7 +397,7 @@ export const resetPassword = async (req, res, next) => {
   }
 };
 
-// ── Change Password (logged in) ───────────────────────────────
+// ── Change Password (logged in) ───────────────────────────────────────────────
 export const changePassword = async (req, res, next) => {
   try {
     const { oldPassword, newPassword, confirmPassword } = req.body;
@@ -407,11 +405,9 @@ export const changePassword = async (req, res, next) => {
     if (!oldPassword || !newPassword || !confirmPassword) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
-
     if (newPassword !== confirmPassword) {
       return res.status(400).json({ success: false, message: 'Passwords do not match' });
     }
-
     if (newPassword.length < 8) {
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
     }
@@ -426,7 +422,7 @@ export const changePassword = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Current password is incorrect' });
     }
 
-    // BUG FIX #1: bcryptjs was used here but never imported → fixed by adding import at top
+    // FIX #1: bcryptjs now imported at top — no more ReferenceError
     user.password = await bcryptjs.hash(newPassword, 10);
     user.lastPasswordChange = new Date();
     await user.save();
@@ -436,3 +432,5 @@ export const changePassword = async (req, res, next) => {
     next(error);
   }
 };
+
+export default { register, login, verifyOTP, getProfile, logout, forgotPassword, resetPassword, changePassword };
