@@ -380,7 +380,7 @@ Security Features: 12+
 
 ### 🌟 If you find this project useful, please give it a ⭐
 
-**Made with ❤️ for cybersecurity-conscious businesses**
+**Made with ❤️ Vinay Singh Tomar**
 
 [Website](https://secureauth.ai) • [Twitter](https://twitter.com/secureauth) • [Docs](./docs)
 
