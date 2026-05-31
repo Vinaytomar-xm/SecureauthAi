@@ -1,9 +1,8 @@
-// FIX #1: bcryptjs was used in resetPassword & changePassword but never imported → ReferenceError
 import bcryptjs from 'bcryptjs';
-import User from '../models/User.js';
-import SecurityLog from '../models/SecurityLog.js';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
+import User from '../models/User.js';
+import SecurityLog from '../models/SecurityLog.js';
 import { sendOTPEmail, sendSecurityAlertEmail } from '../utils/emailService.js';
 import {
   calculateRiskScore,
@@ -35,9 +34,12 @@ export const register = async (req, res, next) => {
   try {
     const { firstName, lastName, email, password, confirmPassword } = req.body;
 
-    if (!firstName || !lastName || !email || !password || !confirmPassword) {
-      return res.status(400).json({ success: false, message: 'Please provide all required fields' });
-    }
+    if (!firstName) return res.status(400).json({ success: false, message: 'Please provide first name' });
+    if (!lastName) return res.status(400).json({ success: false, message: 'Please provide last name' });
+    if (!email) return res.status(400).json({ success: false, message: 'Please provide email' });
+    if (!password) return res.status(400).json({ success: false, message: 'Please provide password' });
+    if (!confirmPassword) return res.status(400).json({ success: false, message: 'Please confirm password' });
+
     if (password !== confirmPassword) {
       return res.status(400).json({ success: false, message: 'Passwords do not match' });
     }
@@ -77,13 +79,17 @@ export const register = async (req, res, next) => {
   }
 };
 
-// ── Login with Risk Assessment ────────────────────────────────────────────────
+// ── Login ─────────────────────────────────────────────────────────────────────
 export const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
+    // LOGIN ONLY needs email + password — no firstName/lastName
     if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Please provide email and password' });
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide email and password',
+      });
     }
 
     const user = await User.findOne({ email }).select('+password');
@@ -92,17 +98,9 @@ export const login = async (req, res, next) => {
     }
 
     if (user.isAccountLocked()) {
-      await SecurityLog.create({
-        userId: user._id,
-        eventType: 'login_attempt',
-        severity: 'medium',
-        description: 'Login attempt on locked account',
-        ipAddress: getClientIP(req),
-        status: 'detected',
-      });
       return res.status(423).json({
         success: false,
-        message: 'Account temporarily locked due to multiple failed login attempts. Please try again later.',
+        message: 'Account temporarily locked. Please try again later.',
       });
     }
 
@@ -113,27 +111,23 @@ export const login = async (req, res, next) => {
         userId: user._id,
         eventType: 'login_failed',
         severity: 'low',
-        description: 'Failed login attempt - incorrect password',
+        description: 'Failed login - incorrect password',
         ipAddress: getClientIP(req),
         status: 'detected',
       });
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password',
-        attemptsRemaining: Math.max(0, 5 - user.failedLoginAttempts - 1),
+        attemptsRemaining: Math.max(0, 5 - (user.failedLoginAttempts + 1)),
       });
     }
 
-    // ── Gather context ────────────────────────────────────────────────────────
+    // ── Gather device/location info ───────────────────────────────────────────
     const userAgent = req.headers['user-agent'] || 'Unknown';
     const deviceInfo = extractDeviceInfo(userAgent);
     const ipAddress = getClientIP(req);
     const location = getLocationFromIP(ipAddress);
-
-    // FIX #2 & #3: riskFactors is a plain OBJECT — was doing .push() on it (TypeError)
-    // and const riskScore was being reassigned with += (TypeError: Assignment to constant)
-    // Solution: check VPN BEFORE building riskFactors so score includes it from the start
-    const vpnDetected = isVPNorProxy(ipAddress); // FIX #4: isVPNorProxy is sync — removed await
+    const vpnDetected = isVPNorProxy(ipAddress);
 
     const riskFactors = {
       failedAttempts: user.failedLoginAttempts,
@@ -143,31 +137,21 @@ export const login = async (req, res, next) => {
       geographicAnomalySuspicious: false,
       rapidLocationChange: false,
       phishingDetected: false,
-      vpnDetected,        // FIX #2: set as property, not .push()
+      vpnDetected,
       torDetected: false,
       userAgentMismatch: false,
     };
 
     if (user.loginHistory.length > 0) {
-      const lastLogin = user.loginHistory[user.loginHistory.length - 1];
-      riskFactors.rapidLocationChange = checkRapidLocationChange(lastLogin.location, location);
+      const last = user.loginHistory[user.loginHistory.length - 1];
+      riskFactors.rapidLocationChange = checkRapidLocationChange(last.location, location);
     }
 
-    // FIX #3: use let so it can be used (even though we no longer need +=)
     const riskScore = calculateRiskScore(riskFactors);
     const riskLevel = getRiskLevel(riskScore);
     const riskAction = getRiskAction(riskLevel);
 
-    await user.recordLogin({
-      ipAddress,
-      deviceId: deviceInfo.deviceId,
-      deviceName: deviceInfo.deviceName,
-      location,
-      riskScore,
-      riskLevel,
-      success: true,
-    });
-
+    await user.recordLogin({ ipAddress, deviceId: deviceInfo.deviceId, deviceName: deviceInfo.deviceName, location, riskScore, riskLevel, success: true });
     await user.addDevice({ ...deviceInfo, ipAddress, location });
     await user.resetFailedAttempts();
 
@@ -176,17 +160,17 @@ export const login = async (req, res, next) => {
       eventType: 'login_success',
       severity: riskLevel === 'low' ? 'low' : 'medium',
       riskScore,
-      description: `Login successful - Risk Level: ${riskLevel}`,
+      description: `Login successful - Risk: ${riskLevel}`,
       ipAddress,
       deviceInfo,
       location,
       status: 'verified',
     });
 
-    // Generate and send OTP for every login
+    // ── Generate + send OTP ───────────────────────────────────────────────────
     const otp = generateOTP();
     user.otpCode = otp;
-    user.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+    user.otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 min
     await user.save();
 
     try {
@@ -203,14 +187,13 @@ export const login = async (req, res, next) => {
       try {
         await sendSecurityAlertEmail(email, user.firstName, {
           type: riskLevel === 'critical' ? 'Unusual Login Detected' : 'Verification Needed',
-          location: location.city || 'Unknown',
+          location: location?.city || 'Unknown',
           riskLevel: riskLevel.toUpperCase(),
           isUnauthorizedNetwork: vpnDetected,
           riskScore,
         });
-      } catch (alertError) {
-        console.error('[Email] Alert send failed:', alertError.message);
-        // Non-fatal — continue
+      } catch (e) {
+        console.error('[Email] Alert failed:', e.message);
       }
     }
 
@@ -242,7 +225,7 @@ export const verifyOTP = async (req, res, next) => {
     }
 
     if (!user.otpExpires || user.otpExpires < new Date()) {
-      return res.status(400).json({ success: false, message: 'OTP has expired. Please login again.' });
+      return res.status(400).json({ success: false, message: 'OTP expired. Please login again.' });
     }
 
     if (user.otpCode !== otp) {
@@ -283,10 +266,7 @@ export const verifyOTP = async (req, res, next) => {
 // ── Get Profile ───────────────────────────────────────────────────────────────
 export const getProfile = async (req, res, next) => {
   try {
-    // FIX #5: .populate('devices loginHistory') was wrong — these are embedded subdocuments
-    // NOT ObjectId refs to other collections. .populate() only works on ObjectId refs.
     const user = await User.findById(req.user.id);
-
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -325,19 +305,14 @@ export const logout = async (req, res, next) => {
 export const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
-
     if (!email) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
     const user = await User.findOne({ email });
-
-    // FIX: return same response whether user exists or not — prevents email enumeration
     if (!user) {
-      return res.status(200).json({
-        success: true,
-        message: 'If this email is registered, an OTP has been sent.',
-      });
+      // Same response — prevents email enumeration
+      return res.status(200).json({ success: true, message: 'If this email is registered, an OTP has been sent.' });
     }
 
     const otp = generateOTP();
@@ -347,10 +322,7 @@ export const forgotPassword = async (req, res, next) => {
 
     await sendOTPEmail(email, otp, user.firstName);
 
-    res.status(200).json({
-      success: true,
-      message: 'If this email is registered, an OTP has been sent.',
-    });
+    res.status(200).json({ success: true, message: 'If this email is registered, an OTP has been sent.' });
   } catch (error) {
     next(error);
   }
@@ -371,12 +343,10 @@ export const resetPassword = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
     }
 
-    // FIX: select +otpCode so we can read it
     const user = await User.findOne({ email }).select('+otpCode');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-
     if (!user.otpCode || !user.otpExpires || new Date() > user.otpExpires) {
       return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
     }
@@ -384,7 +354,6 @@ export const resetPassword = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Invalid OTP' });
     }
 
-    // FIX #1: bcryptjs now imported at top — no more ReferenceError
     user.password = await bcryptjs.hash(newPassword, 10);
     user.otpCode = undefined;
     user.otpExpires = undefined;
@@ -397,7 +366,7 @@ export const resetPassword = async (req, res, next) => {
   }
 };
 
-// ── Change Password (logged in) ───────────────────────────────────────────────
+// ── Change Password ───────────────────────────────────────────────────────────
 export const changePassword = async (req, res, next) => {
   try {
     const { oldPassword, newPassword, confirmPassword } = req.body;
@@ -422,7 +391,6 @@ export const changePassword = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Current password is incorrect' });
     }
 
-    // FIX #1: bcryptjs now imported at top — no more ReferenceError
     user.password = await bcryptjs.hash(newPassword, 10);
     user.lastPasswordChange = new Date();
     await user.save();
@@ -432,5 +400,3 @@ export const changePassword = async (req, res, next) => {
     next(error);
   }
 };
-
-export default { register, login, verifyOTP, getProfile, logout, forgotPassword, resetPassword, changePassword };
